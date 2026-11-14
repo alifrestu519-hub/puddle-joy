@@ -1,11 +1,9 @@
-# The Day in Pictures — make.fun news-image-01
+# Steam & Gold — make.fun food-picture-01
 
-A newspaper front page summing up the world's news of Friday 13
-November 2026 in four pictures: Nvidia's CEO resigns, Ukraine fires
-nearly 1,200 drones at Russia, US flights are grounded then resume
-after an FAA halt, and China runs unannounced Pacific drills around
-Taiwan. Headlines are rendered as crisp text over four clean editorial
-illustrations, so the day reads at a glance.
+A steaming bowl of ramen in close-up: chopsticks lifting glossy
+noodles from rich golden broth, a soft-boiled egg with a jammy yolk,
+sliced chashu pork and spring onions, wisps of steam rising in warm
+golden side light. One look and you want to eat it.
 
 ## How it works
 
@@ -20,14 +18,8 @@ source. No network, no randomness: every run writes identical bytes.
 mkdir -p out && MAKEFUN_OUTPUT_DIR=out python3 main.py
 ```
 
-The image is 1024×1024, 197,427 bytes (JPEG data in a `.png` name,
-which the competition allows — the format is told apart by its first
-bytes).
-
-## Sources
-
-Associated Press, Reuters, BBC, The Guardian — events of 13 November
-2026.
+The image is 1024×683 (JPEG data in a `.png` name, which the
+competition allows — the format is told apart by its first bytes).
 
 ## License
 
