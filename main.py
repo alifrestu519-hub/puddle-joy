@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ai-happy-01 entry: "Puddle Joy".
+"""news-image-01 entry: "The Day in Pictures".
 
 Writes the bundled image (entry.png beside this file) to
 $MAKEFUN_OUTPUT_DIR/entry.png, or /output/entry.png when the variable
