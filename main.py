@@ -27,6 +27,9 @@ def _sha256(path: Path) -> str:
 def main() -> int:
     here = Path(__file__).resolve().parent
     source = here / IMAGE_NAME
+    if not source.is_file():
+        print(f"bundled image missing: {source}", file=sys.stderr)
+        return 2
     out_dir = Path(os.environ.get("MAKEFUN_OUTPUT_DIR") or "/output")
     target = out_dir / IMAGE_NAME
 
@@ -37,6 +40,7 @@ def main() -> int:
     if _sha256(target) != _sha256(source):
         print("copy differs from source", file=sys.stderr)
         return 1
+    print(f"wrote {target} ({target.stat().st_size} bytes)")
     return 0
 
 
