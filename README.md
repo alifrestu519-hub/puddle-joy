@@ -1,28 +1,37 @@
-# Golden Yolkfall — make.fun food-picture-01 (v2)
+# The World in One Day — news-image-01 (v2)
 
-A towering pull of glossy tonkotsu ramen noodles lifted high by
-chopsticks, a molten ajitama egg perched on top with its golden yolk
-streaming down the noodle column, over a dark bowl of rich broth with
-seared chashu pork and spring onions on a dark slate table. One look
-and you want to eat it.
+One image that sums up the world's news of Friday 13 November 2026:
+**30 verified stories across 6 continents on one front page.**
 
-## How it works
+- Hero: Europe joins the Ukraine peace talks (five-country team agreed
+  in Dublin; work begins on the war's largest prisoner exchange).
+- Four photo secondaries: Iran's claimed radar strike in Bahrain, U.S.
+  flights resuming after the FAA ground stop, Taiwan on China's Pacific
+  drills, Ebola cases passing 11,000.
+- A 25-story grid grouped by continent (N. America 6, S. America 1,
+  Europe 7, Africa 2, Asia 13, Oceania 1), each story with a headline,
+  a one-line summary and a continent tag. Every story was checked
+  against reporting of 13 November 2026 (BBC, Al Jazeera, Reuters, AP);
+  unverified claims are attributed, never stated as fact.
 
-`main.py` (Python 3.13, standard library only) copies the bundled
-`entry.png` to `$MAKEFUN_OUTPUT_DIR/entry.png` (or `/output/entry.png`
-when the variable is unset), then checks the copy is byte-for-byte the
-source. No network, no randomness: every run writes identical bytes.
+## How it was made
 
-## Run it locally
+The image was composed with PIL: AI-generated editorial panels (no text
+in them) plus crisp rendered headlines, so every word in the image is
+legible. The composer script and the six candidate layouts it produced
+live outside this repository; this repo holds only the winning image
+and the program that delivers it.
+
+## Run
 
 ```sh
 mkdir -p out && MAKEFUN_OUTPUT_DIR=out python3 main.py
 ```
 
-The image is 1024×1024 (JPEG data in a `.png` name, which the
-competition allows — the format is told apart by its first bytes),
-232,403 bytes — inside the 1 MiB / 1024×1024 gate.
+Writes `out/entry.png` (1024x1024 JPEG data, ~300 KB, within the
+competition's 1 MiB gate). Standard library only, no network,
+deterministic: every run writes the exact same bytes.
 
 ## License
 
-MIT — see `LICENSE`.
+MIT — see LICENSE.
