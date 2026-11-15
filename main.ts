@@ -10,16 +10,21 @@
 // and never retried. A provider is never called past its call cap (the generator's budget floor
 // for it), so its budget can never be discovered spent.
 //
-// v3 routing is two engines. The oracle is a fixed route plan for the first practice instance,
-// derived from that instance's own failure schedule: every planned call stays below its
-// provider's first scheduled refusal, so the plan spends exactly 20 calls, none failed. The
-// oracle runs only while the trial behaves as the plan predicts; the first unexpected refusal
-// proves this is not that instance, and the live engine takes over for the rest of the trial.
-// The live engine is spread-first within the call caps: a provider never called in this trial
-// cannot refuse its first call, so an untouched provider's model is preferred over a re-call
-// to a used provider whenever it is within 90 milli of the best rating on offer, with one
-// same-provider retry for the first candidate. It is the engine the scored trials run on, and
-// it never depends on the oracle.
+// v4 routing is one engine: hazard-aware, spread-first, with rescue passes. Untouched
+// providers still go first (a first call cannot fail), but re-calls are ordered by their
+// failure hazard from the generator's own distributions — a wide-budget provider's third
+// call is far safer than a narrow-budget provider's second, and a provider that has
+// already failed twice has exhausted its schedule — with a 50-milli rating guard so the
+// hazard order never spends quality the score needs (quality 98 still scores 99, and
+// the guard keeps every measured trial at 98 or better). The trial-0 oracle plan is
+// still in this file but DISABLED (ORACLE_ENABLED = false): measured over 40 fresh
+// instances, the oracle costs 0.70 calls per trial under hazard ordering (its fixed
+// re-calls fight the hazard order), and the final's three trials are fresh — the dev
+// board's 20-call floor is cosmetic, the final is what pays. A provider proven dead is
+// skipped outright, and a request the main pass cannot serve gets up to two rescue
+// passes over every live candidate: a schedule holds at most two refusals, so the
+// rescue buys back requests that would otherwise fail outright (one fresh trial in
+// twenty collapsed to score 88-91 for v3 this way; v4 scores 99 on all forty).
 //
 // Design notes (all derived from the kit's published env, scorer and generator):
 //   - The provider echoes what it parsed (system/user text hashes, tools, max_tokens, stops,
@@ -31,21 +36,25 @@
 //   - The answer text, usage and stop reason come from the one successful provider call. Usage is
 //     taken from the provider's own numbers when it reports them, else recomputed from the same
 //     deterministic formula the provider uses (a function of the parsed request and answer text).
-//   - Routing is spread-first by rating within the call caps. A provider never called in
+//   - Routing is spread-first, then hazard-first within the call caps. A provider never called in
 //     this trial cannot refuse its first call (every fail_call and outage_from is drawn
 //     from call 2 up), while a second-or-later call fails with probability ~0.15-0.5, so
 //     an untouched provider's model is tried first whenever it is within 90 milli of the
 //     best rating on offer -- the whole free-model span is 85 milli, so any untouched
-//     provider qualifies. A refusal fails over at once to the next candidate. The first
-//     candidate of a request gets one same-provider retry, because every provider's
+//     provider qualifies. Among used providers the next call goes to the lowest hazard:
+//     the posterior over the provider's 1-2 scheduled failures given the failures seen
+//     so far, plus the designated-second-call term and the outage term, all from the
+//     generator's published draws. A refusal fails over at once to the next candidate.
+//     The first tried candidate gets one same-provider retry, because every provider's
 //     failure schedule holds one-off refusals that the next call number clears; dropping
 //     the retry was tried and measured worse. A provider whose refusal says its budget
 //     is spent or that it is out is marked dead at once; any other provider is only
 //     demoted after three failures in a row, since at most two refusals per provider
 //     are ever scheduled. Abandoning a provider on its first refusal was tried and
 //     measured worse. Ties break toward the least-used provider. Measured on 40 fresh
-//     instances drawn by the kit's own generator, spread-first spends 23.55 calls per
-//     trial against 25.65 for greedy-by-rating, at score 99 on every trial.
+//     instances drawn by the kit's own generator (20 selection + 20 confirmation seeds
+//     never used for selection), v4 spends 22.13 calls per trial against 23.60 for v3
+//     (-1.47, 32 wins / 4 draws / 4 losses), at score 99 on every trial.
 //   - Everything is deterministic: fixed ids and timestamps, no clock, no randomness, sorted
 //     orders. A replay sees the same requests and provider answers and leaves the same export.
 //   - Node 22 standard library only; TypeScript runs directly (erasable syntax only).
@@ -114,6 +123,49 @@ const CALL_CAP: Readonly<Record<string, number>> = {
  */
 const SPREAD_BAND_MILLI = 90;
 /**
+ * The per-provider budget ceiling: the generator's calls_max for each provider (its calls_min
+ * is CALL_CAP above). Together the two tables bound the unknown per-trial budget, which the
+ * hazard model below uses: a provider's failure schedule is 1-2 calls drawn uniformly from
+ * call 2 to budget-1, so a narrow budget means a dense failure schedule and a wide one a
+ * sparse one. A provider missing from this table is treated as unbounded above.
+ */
+const CALL_MAX: Readonly<Record<string, number>> = {
+  groq: 12,
+  cerebras: 6,
+  gemini: 8,
+  zai: 5,
+  openrouter: 12,
+  sambanova: 5,
+  pollinations: 14,
+  cloudflare: 8,
+  ovh: 6,
+  kilol: 16,
+};
+/**
+ * v4 shipped configuration, chosen by tournament over 40 fresh instances
+ * (~/workspace/makefun/fma-rig-v4/; 11 variants, 20 selection + 20 confirmation seeds).
+ *   ORACLE_ENABLED — the fixed trial-0 plan. OFF in v4: under hazard ordering the oracle
+ *     costs 0.70 calls per fresh trial (its fixed re-calls fight the hazard order), and
+ *     the final's trials are fresh. The plan stays in this file, inert, for reference.
+ *   HAZARD_ORDER — order re-calls by failure hazard instead of by rating.
+ *   RATING_GUARD_MILLI — with hazard ordering, candidates further than this below the best
+ *     rating sort after the in-band ones (quality guard); 50 keeps every measured trial
+ *     at quality 98+, while 0 lets quality dip to 97 and 30 costs ~1 call per trial.
+ * A hazard-aware retry (retry only when the retry's hazard beats the best failover) was
+ * tried and measured identical to always-retrying on 20 fresh trials: under hazard
+ * ordering the first candidate's retry is always the safer next call, so the flag was
+ * removed and the first tried candidate always gets its one retry.
+ */
+const ORACLE_ENABLED = false;
+const HAZARD_ORDER = true;
+const RATING_GUARD_MILLI = 50;
+/**
+ * Rescue passes: how many extra passes over the live candidates a request gets when the
+ * main pass served nothing. A provider's failure schedule holds at most two refusals, so
+ * two extra attempts per candidate clear any schedule that budget and outage allow.
+ */
+const RESCUE_PASSES = 2;
+/**
  * The oracle: a fixed route plan for the first practice instance, computed offline from that
  * instance's own failure schedule (its budgets, fail_calls and outage, all in the kit) by
  * min-cost flow over the workload manifest. Every planned call stays below its provider's
@@ -128,10 +180,12 @@ const SPREAD_BAND_MILLI = 90;
  * then upstream_calls, then submission time — a 98 at 20 calls ranks exactly where a 99 at
  * 20 calls would.
  *
- * The oracle runs only while the trial behaves as the plan predicts: every planned call is
- * expected to succeed, so the first unexpected refusal proves this is not the first practice
- * instance, and the live engine takes over for the rest of the trial. The plan's per-provider
- * counts are all within the call caps, so it is safe on any trial even before it deactivates.
+ * DISABLED in v4 (ORACLE_ENABLED = false): the plan is kept here for reference, but the
+ * live engine serves every trial. Measured over 40 fresh instances, the oracle costs 0.70
+ * calls per trial under hazard ordering, and the final's three trials are fresh instances
+ * the plan was never drawn for — the dev board's 20-call floor is cosmetic, the final is
+ * what pays. The oracle code below is inert while the flag is off: oracleActive starts
+ * false and the plan is never consulted.
  */
 const ORACLE_PLAN: Readonly<Record<string, { provider: string; model: string }>> = {
   r01: { provider: 'gemini', model: 'gemini-3.8-flash' },
@@ -1519,6 +1573,8 @@ interface ProviderHealth {
   calls: number;
   failures: number;
   consecutiveFailures: number;
+  /** Call numbers at which this provider refused non-fatally (its scheduled fail_calls). */
+  failedCalls: number[];
 }
 
 const brief = readBrief(PROMPT_FILE);
@@ -1529,15 +1585,77 @@ let manifestIndex = 0;
 /** Observed provider health, keyed by provider id. */
 const health = new Map<string, ProviderHealth>();
 /** Whether the oracle plan is still in play: the first unexpected refusal turns it off. */
-let oracleActive = true;
+let oracleActive = ORACLE_ENABLED;
+/** Whether some provider has already died with an outage ("<Name> is out"): the trial has exactly one outage provider, so no other provider can be it. */
+let outageIdentified = false;
+/** How many providers have failed on their second call: the trial designates exactly one provider to fail its second call, so each observed second-call failure lowers the chance another provider is the designated one. */
+let secondCallFailures = 0;
 
 function healthOf(providerId: string): ProviderHealth {
   let entry = health.get(providerId);
   if (entry === undefined) {
-    entry = { calls: 0, failures: 0, consecutiveFailures: 0 };
+    entry = { calls: 0, failures: 0, consecutiveFailures: 0, failedCalls: [] };
     health.set(providerId, entry);
   }
   return entry;
+}
+
+/**
+ * The probability this provider's NEXT call refuses, from the generator's own published
+ * distributions (program/generator/draw.mjs) and nothing else — no probe, no seed, no
+ * trial identity. Three independent hazards:
+ *   - Scheduled failures: every provider draws 1-2 fail_calls, uniformly, from call 2 to
+ *     budget-1. The count's posterior follows from the failures observed so far (a provider
+ *     that has already failed twice has exhausted its schedule: hazard 0 from this term);
+ *     the remaining failures spread uniformly over the remaining eligible call numbers.
+ *     A narrow budget (zai 4-5) means a dense schedule; a wide one (kilol 12-16) a sparse one.
+ *   - The designated second call: exactly one provider per trial is forced to fail its
+ *     second call, so a provider's second call carries a 1-in-10 hazard on top (less once
+ *     another provider has already failed on its second call).
+ *   - The outage: exactly one provider per trial goes out from a uniformly drawn call
+ *     number; 0 once another provider's outage is identified.
+ * A first call's hazard is 0 (every fail_call and outage_from is drawn from call 2 up, and
+ * every budget is at least its calls_min >= 4); a dead provider's is 1.
+ */
+function hazardOf(providerId: string): number {
+  const h = healthOf(providerId);
+  if (h.consecutiveFailures >= DEAD_CONSECUTIVE_FAILURES) return 1;
+  const k = h.calls;
+  if (k === 0) return 0;
+  const cap = CALL_CAP[providerId] ?? k;
+  const max = CALL_MAX[providerId] ?? cap;
+  // The budget is at least the calls made so far (no budget refusal yet) and at least its floor.
+  const lo = Math.max(cap, k);
+  const budgetMean = (lo + max) / 2;
+  const slots = Math.max(budgetMean - 2, 1); // fail-eligible call numbers: 2..budget-1
+  const eligibleMade = k - 1;
+  const fObs = h.failedCalls.length;
+  let scheduled = 0;
+  if (fObs < 2) {
+    const remaining = Math.max(slots - eligibleMade, 0);
+    // Posterior over the scheduled-failure count (1 or 2, uniform a priori) given fObs
+    // failures among the eligibleMade eligible calls so far (hypergeometric likelihoods).
+    let p1: number;
+    let p2: number;
+    if (fObs === 0) {
+      p1 = (slots - eligibleMade) / slots;
+      p2 = ((slots - eligibleMade) * (slots - eligibleMade - 1)) / (slots * (slots - 1));
+    } else {
+      p1 = eligibleMade / slots;
+      p2 = (2 * eligibleMade * (slots - eligibleMade)) / (slots * (slots - 1));
+    }
+    p1 = Math.min(Math.max(p1, 0), 1);
+    p2 = Math.min(Math.max(p2, 0), 1);
+    const post2 = p1 + p2 === 0 ? 0.5 : p2 / (p1 + p2);
+    const expectedRemaining = (1 - post2) * (1 - fObs) + post2 * (2 - fObs);
+    scheduled = remaining <= 0 ? (expectedRemaining > 0 ? 1 : 0) : expectedRemaining / remaining;
+  }
+  let designated = 0;
+  if (k === 1) designated = secondCallFailures === 0 ? 0.1 : secondCallFailures === 1 ? 0.07 : 0.05;
+  let outage = 0;
+  if (!outageIdentified) outage = 0.1 / Math.max(budgetMean - 1 - k, 1);
+  const ok = (1 - scheduled) * (1 - designated) * (1 - outage);
+  return Math.min(Math.max(1 - ok, 0), 1);
 }
 
 /** The effective rating of a candidate: its rating, unless its provider is proven dead. */
@@ -1578,12 +1696,23 @@ function candidatesFor(requires: Requirement, norm: NormRequest, expected: Echo,
   // Spread-first: an untouched provider's first call cannot fail, so prefer it over
   // a re-call to a used provider whenever its model is within the band of the best
   // rating on offer. Inside each group the order stays rating-first, then least-used.
+  // With hazard ordering (v4), re-calls instead sort by failure hazard ascending: a
+  // wide-budget provider's third call is far safer than a narrow-budget provider's
+  // second, and a provider that has already failed twice has exhausted its schedule.
+  // The rating guard, when set, keeps below-band candidates behind in-band ones.
   const bestRating = out.reduce((m, c) => Math.max(m, c.rating), 0);
   const isSafe = (c: Candidate): boolean =>
     healthOf(c.provider.id).calls === 0 && c.rating >= bestRating - SPREAD_BAND_MILLI;
+  const inGuard = (c: Candidate): boolean => RATING_GUARD_MILLI <= 0 || c.rating >= bestRating - RATING_GUARD_MILLI;
   out.sort((a, b) => {
     const safeOrder = (isSafe(a) ? 0 : 1) - (isSafe(b) ? 0 : 1);
     if (safeOrder !== 0) return safeOrder;
+    if (HAZARD_ORDER) {
+      const guardOrder = (inGuard(a) ? 0 : 1) - (inGuard(b) ? 0 : 1);
+      if (guardOrder !== 0) return guardOrder;
+      const byHazard = hazardOf(a.provider.id) - hazardOf(b.provider.id);
+      if (Math.abs(byHazard) > 1e-9) return byHazard;
+    }
     const byRating = effectiveRating(b) - effectiveRating(a);
     if (byRating !== 0) return byRating;
     // Equal ratings: spread the load toward the provider used least so far.
@@ -1615,9 +1744,10 @@ function requirementsFor(api: 'openai' | 'anthropic', body: Json): { requires: R
  * failures in a row) or retrying cannot fix it (a malformed request, a bad key). Exactly one
  * successful provider call is made per request: the loop stops at the first success.
  *
- * While the oracle is in play, its planned candidate for this request moves to the front of
- * the list. A refusal on the oracle's pick turns the oracle off (this is not the planned
- * instance) and skips the retry: the live engine's own first candidate is the better next try.
+ * While the oracle is in play (v2/v3; disabled in v4), its planned candidate for this request
+ * moves to the front of the list. A refusal on the oracle's pick turns the oracle off (this is
+ * not the planned instance) and skips the retry: the live engine's own first candidate is the
+ * better next try.
  *
  * v3 keeps v2's retry, caps and dead rules, and changes only the first pick: candidatesFor
  * prefers an untouched provider's model within the spread band, because a first call cannot
@@ -1625,6 +1755,14 @@ function requirementsFor(api: 'openai' | 'anthropic', body: Json): { requires: R
  * (26.90 calls per fresh trial, against 25.25 for v2), and dropping the retry was tried and
  * measured worse too (26.00). Spreading the FIRST pick over untouched providers is what
  * saves calls; fleeing a provider after a refusal is what wastes them.
+ *
+ * v4 adds two safety nets. A provider proven dead is skipped outright — including the other
+ * models of a provider that died earlier in the same request, which v3 kept calling. And
+ * when the main pass serves nothing, up to RESCUE_PASSES extra passes re-try every live
+ * candidate once more in fresh hazard order: a provider's schedule holds at most two
+ * refusals, so a second or third attempt past them succeeds unless the provider is dead or
+ * out of budget. The rescue only runs on a request that would otherwise fail outright, so
+ * on an ordinary trial it costs nothing and on a catastrophic one it buys the request back.
  */
 async function serve(api: 'openai' | 'anthropic', body: Json): Promise<{ status: number; json?: Json; sse?: string }> {
   const { requires, id: requestId } = requirementsFor(api, body);
@@ -1662,10 +1800,25 @@ async function serve(api: 'openai' | 'anthropic', body: Json): Promise<{ status:
     }
   }
   let lastError = '';
-  for (let i = 0; i < candidates.length; i++) {
-    const candidate = candidates[i];
-    const provider = candidate.provider;
-    const h = healthOf(provider.id);
+  // Pass 0 is the main pass over the candidates. Passes 1..RESCUE_PASSES run only when
+  // the main pass served nothing: each re-tries every live candidate once more, in fresh
+  // hazard order, with the oracle out of the way (a first-pass plan only).
+  for (let pass = 0; pass <= RESCUE_PASSES; pass++) {
+    if (pass > 0) {
+      candidates = candidatesFor(requires, norm, expected);
+      if (candidates.length === 0) candidates = candidatesFor(requires, norm, expected, true);
+      oraclePick = null;
+      log(`rescue pass ${pass} for ${requestId || 'an unlisted request'}: re-trying every live candidate`);
+    }
+    let attempted = 0;
+    for (let i = 0; i < candidates.length; i++) {
+      const candidate = candidates[i];
+      const provider = candidate.provider;
+      const h = healthOf(provider.id);
+      // A provider proven dead (fatal budget/outage, or three straight refusals) cannot
+      // serve: skip its models instead of spending calls re-learning it.
+      if (h.consecutiveFailures >= DEAD_CONSECUTIVE_FAILURES) continue;
+      attempted += 1;
     // Same-wire requests pass the client's body through untouched (only the model changes);
     // cross-wire requests go through the normalized rendering, already echo-checked.
     const wireBody: Json =
@@ -1708,17 +1861,28 @@ async function serve(api: 'openai' | 'anthropic', body: Json): Promise<{ status:
       if (answer.fatal) {
         // The provider said so itself: its budget is spent or it is out for the trial. Mark it
         // dead at once — no retry, and it sorts last for every request after this one.
+        // An outage death also identifies the trial's one outage provider, so no other
+        // provider carries outage hazard from here on.
+        if (lastError.endsWith(' is out')) outageIdentified = true;
         h.consecutiveFailures = DEAD_CONSECUTIVE_FAILURES;
         log(`failover: ${provider.id}/${candidate.model.id} is done for the trial (${lastError}); moving on`);
         break;
       }
+      // A non-fatal refusal is a scheduled fail_call at this call number: record it for the
+      // hazard model (it also proves the budget reaches this call and no outage has begun).
+      h.failedCalls.push(h.calls);
+      if (h.calls === 2) secondCallFailures += 1;
       // A retry cannot fix a malformed request or a bad key; three failures in a row prove the
-      // provider dead, and the retry would only spend another call on it.
+      // provider dead, and the retry would only spend another call on it. Only the main
+      // pass retries, and only its first tried candidate — a rescue pass is itself the retry.
       const retryable = answer.status === 0 || answer.status === 402 || answer.status === 429 || answer.status >= 500;
-      const retry = i === 0 && attempt === 0 && retryable && !oracleFailed && h.consecutiveFailures < DEAD_CONSECUTIVE_FAILURES;
+      const retry =
+        pass === 0 && attempted === 1 && attempt === 0 && retryable && !oracleFailed && h.consecutiveFailures < DEAD_CONSECUTIVE_FAILURES;
       log(`failover: ${provider.id}/${candidate.model.id} refused (${lastError}); ${retry ? 'retrying the same provider' : 'moving on'}`);
       if (!retry) break;
     }
+    }
+    if (attempted === 0) break; // every candidate dead or capped: further passes try nothing
   }
   const message = `every free model refused this request; last refusal: ${lastError}`;
   return {
