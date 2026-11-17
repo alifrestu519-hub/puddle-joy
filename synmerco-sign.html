@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="id"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sambung Dompet Synmerco</title>
+<style>
+* { box-sizing: border-box; }
+body { font-family: -apple-system, system-ui, sans-serif; margin: 0; padding: 16px; background: #0f172a; color: #e2e8f0; }
+.card { max-width: 560px; margin: 0 auto; background: #1e293b; border-radius: 12px; padding: 18px; }
+h1 { font-size: 19px; margin: 0 0 6px; }
+p { font-size: 14px; line-height: 1.5; color: #cbd5e1; margin: 8px 0; }
+pre { background: #0f172a; border: 1px solid #334155; border-radius: 8px; padding: 12px; font-size: 12.5px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; color: #e2e8f0; margin: 10px 0; }
+button { width: 100%; padding: 13px; margin-top: 10px; font-size: 16px; font-weight: 600; border: none; border-radius: 10px; cursor: pointer; background: #22c55e; color: #04120a; }
+button:disabled { background: #475569; color: #94a3b8; cursor: default; }
+button.secondary { background: #334155; color: #e2e8f0; }
+.status { font-size: 13px; margin-top: 12px; padding: 10px; border-radius: 8px; background: #0f172a; border: 1px solid #334155; min-height: 20px; word-break: break-word; }
+.sig { font-size: 12px; word-break: break-all; }
+.ok { color: #4ade80; } .err { color: #f87171; }
+.small { font-size: 12px; color: #94a3b8; }
+</style></head><body>
+<div class="card">
+<h1>Sambung Dompet Synmerco</h1>
+<p>Ketuk tombol di bawah untuk menandatangani pesan ini dengan dompetmu. <b>Tanda tangan ini gratis</b> &mdash; bukan transaksi, tanpa gas, tidak ada dana yang bergerak. Pesan ini hanya membuktikan dompet ini milikmu.</p>
+<p class="small" id="expiry"></p>
+<pre id="msg"></pre>
+<button id="btnConnect">1. Sambungkan Dompet</button>
+<button id="btnSign" disabled>2. Tanda Tangani Pesan</button>
+<div class="status" id="status">Belum tersambung.</div>
+<div id="sigBox" style="display:none">
+<p><b>Tanda tanganmu:</b></p>
+<pre class="sig" id="sig"></pre>
+<button class="secondary" id="btnCopy">Salin Tanda Tangan</button>
+<p class="small">Sesudah disalin, kembali ke chat Muse dan tempel tanda tangan itu sebagai balasan.</p>
+</div>
+<p class="small">Halaman ini hanya berjalan di browser DApp aplikasi dompetmu. Pesan ini berlaku 10 menit sejak dibuat.</p>
+</div>
+<script>
+const MESSAGE = "synmerco.com wants you to sign in with your Ethereum account:\n0xFe7702d75677b8b07213dA2d2c864092589AD814\n\nConnect this wallet as the payout wallet for your Synmerco agent.\n\nURI: https://synmerco.com\nVersion: 1\nChain ID: 8453\nNonce: 900c8868230c4cfca7d888158a29078f\nIssued At: 2026-11-17T11:45:10Z";
+const EXPECTED = "0xFe7702d75677b8b07213dA2d2c864092589AD814";
+document.getElementById('msg').textContent = MESSAGE;
+const expEl = document.getElementById("expiry");
+function tickExpiry() {
+  const line = MESSAGE.split("\n").find(function (l) { return l.indexOf("Issued At:") === 0; });
+  if (!line) return;
+  const issued = new Date(line.slice("Issued At:".length).trim()).getTime();
+  const left = Math.floor((issued + 600000 - Date.now()) / 1000);
+  if (left <= 0) { expEl.textContent = "Pesan ini SUDAH KEDALUWARSA. Minta tautan baru dari Muse."; expEl.style.color = "#f87171"; }
+  else { const mm = Math.floor(left / 60), ss = left % 60; expEl.textContent = "Pesan berlaku, sisa waktu: " + mm + " menit " + String(ss).padStart(2, "0") + " detik."; }
+}
+tickExpiry(); setInterval(tickExpiry, 1000);
+
+const statusEl = document.getElementById('status');
+const btnConnect = document.getElementById('btnConnect');
+const btnSign = document.getElementById('btnSign');
+let account = null;
+function getProvider() {
+  if (window.ethereum) return window.ethereum;
+  if (window.bitkeep && window.bitkeep.ethereum) return window.bitkeep.ethereum;
+  return null;
+}
+function setStatus(html, cls) { statusEl.innerHTML = html; statusEl.className = 'status' + (cls ? ' ' + cls : ''); }
+btnConnect.onclick = async () => {
+  const provider = getProvider();
+  if (!provider) { setStatus('Dompet tidak ditemukan. Buka halaman ini dari browser DApp di aplikasi dompet yang menyimpan dompet baru itu (mis. tab Discover di Bitget, menu Browser di MetaMask), tempel tautan ini di kolom alamat.', 'err'); return; }
+  try {
+    setStatus('Meminta sambungan dompet...');
+    const accounts = await provider.request({ method: 'eth_requestAccounts' });
+    account = accounts[0];
+    if (account.toLowerCase() !== EXPECTED.toLowerCase()) {
+      setStatus('Dompet tersambung: ' + account + '<br><b>Ini BUKAN dompet ' + EXPECTED.slice(0, 6) + '&hellip;.</b> Ganti ke dompet ' + EXPECTED + ' di aplikasi, lalu ketuk lagi tombol 1.', 'err');
+      btnSign.disabled = true;
+      return;
+    }
+    setStatus('Tersambung: ' + account, 'ok');
+    btnSign.disabled = false;
+  } catch (e) { setStatus('Gagal menyambung: ' + (e && e.message ? e.message : e), 'err'); }
+};
+btnSign.onclick = async () => {
+  const provider = getProvider();
+  if (!provider || !account) { setStatus('Sambungkan dompet dulu (tombol 1).', 'err'); return; }
+  try {
+    setStatus('Meminta tanda tangan di dompetmu...');
+    const hex = '0x' + Array.from(new TextEncoder().encode(MESSAGE)).map(b => b.toString(16).padStart(2, '0')).join('');
+    const sig = await provider.request({ method: 'personal_sign', params: [hex, account] });
+    document.getElementById('sig').textContent = sig;
+    document.getElementById('sigBox').style.display = 'block';
+    setStatus('Tanda tangan berhasil dibuat. Salin lalu kirim ke Muse.', 'ok');
+  } catch (e) { setStatus('Gagal menandatangani: ' + (e && e.message ? e.message : e), 'err'); }
+};
+document.getElementById('btnCopy').onclick = async () => {
+  const sig = document.getElementById('sig').textContent;
+  try { await navigator.clipboard.writeText(sig); setStatus('Tanda tangan tersalin.', 'ok'); }
+  catch (e) {
+    const ta = document.createElement('textarea'); ta.value = sig; document.body.appendChild(ta);
+    ta.select(); document.execCommand('copy'); document.body.removeChild(ta);
+    setStatus('Tanda tangan tersalin.', 'ok');
+  }
+};
+</script></body></html>
