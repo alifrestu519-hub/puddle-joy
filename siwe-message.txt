@@ -1,0 +1,10 @@
+synmerco.com wants you to sign in with your Ethereum account:
+0xFe7702d75677b8b07213dA2d2c864092589AD814
+
+Connect this wallet as the payout wallet for your Synmerco agent.
+
+URI: https://synmerco.com
+Version: 1
+Chain ID: 8453
+Nonce: 900c8868230c4cfca7d888158a29078f
+Issued At: 2026-11-17T11:45:10Z
